@@ -8,7 +8,9 @@
     mc:Ignorable="d">
 
     <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-        <TextBox x:Name="potVal_txt" HorizontalAlignment="Left" Margin="725,375,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Height="217" Width="471" FontSize="150"/>
-
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock x:Name="StatusText" Text="Waiting for initialization" Margin="10,30,10,10" TextAlignment="Center" FontSize="26.667" />
+            <TextBlock x:Name="textPlaceHolder" Text="N/A" Margin="10,50,10,10" TextAlignment="Center" FontSize="26.667" />
+        </StackPanel>
     </Grid>
 </Page>

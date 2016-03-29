@@ -3,6 +3,10 @@ using System.Linq;
 using Windows.UI.Xaml.Controls;
 using Windows.Devices.Gpio;
 using Windows.UI.Xaml;
+using Windows.Devices.Spi;
+using System.Threading;
+using System.Threading.Tasks;
+using Windows.Devices.Enumeration;
 
 // The Blank Page item template is documented at http://go.microsoft.com/fwlink/?LinkId=402352&clcid=0x409
 
@@ -13,112 +17,107 @@ namespace ADC_Demo
     /// </summary>
     public sealed partial class MainPage : Page
     {
-        private int _lastRead = 0;
-        private int _tolerance = 5;
-
-        private GpioPin _spimosiPin;
-        private GpioPin _spimisoPin;
-        private GpioPin _spiclkPin;
-        private GpioPin _spicsPin;
-
-        private const int SPICLK_PIN = 18;
-        private const int SPIMISO_PIN = 23;
-        private const int SPIMOSI_PIN = 24;
-        private const int SPICS_PIN = 25;
-
-        private const int POTENTIOMETER_ADC = 0;
-
         public MainPage()
         {
             this.InitializeComponent();
 
-            var timer = new DispatcherTimer();
-            timer.Interval = TimeSpan.FromMilliseconds(50);
-            timer.Tick += Timer_Tick;
+            Unloaded += MainPage_Unloaded;
 
-            InitGpio();
-
-            timer.Start();
+            InitApp();
         }
 
-        private void Timer_Tick(object sender, object e)
+        private async void InitApp()
         {
-            bool potChanged = false;
-
-            int rawValue = ReadAdc(POTENTIOMETER_ADC);
-
-            int potAdjustment = Math.Abs(rawValue - _lastRead);
-
-            if (potAdjustment > _tolerance)
-                potChanged = true;
-
-            if (potChanged)
+            try
             {
-                double potValue = rawValue / 10.24;
-                potValue = Math.Round(potValue);
-                int finalValue = Convert.ToInt32(potValue);
+                //InitGpio();         /* Initialize GPIO to toggle the LED                          */
+                await InitSPI();      /* Initialize the SPI bus for communicating with the ADC      */
 
-                potVal_txt.Text = finalValue.ToString();
+            }
+            catch (Exception ex)
+            {
+                StatusText.Text = ex.Message;
+                return;
+            }
 
-                _lastRead = finalValue;
+            /* Now that everything is initialized, create a timer so we read data every 500mS */
+            periodicTimer = new Timer(this.Timer_Tick, null, 0, 100);
+
+            StatusText.Text = "Status: Running";
+        }
+
+        private void MainPage_Unloaded(object sender, RoutedEventArgs e)
+        {
+            if (periodicTimer != null)
+            {
+                periodicTimer.Dispose();
+            }            
+
+            if (SpiADC != null)
+            {
+                SpiADC.Dispose();
             }
         }
 
-        private void InitGpio()
+        private async Task InitSPI()
         {
-            var gpio = GpioController.GetDefault();
-
-            _spimosiPin = gpio.OpenPin(SPIMOSI_PIN);
-            _spimosiPin.SetDriveMode(GpioPinDriveMode.Output);
-
-            _spimisoPin = gpio.OpenPin(SPIMISO_PIN);
-            _spimisoPin.SetDriveMode(GpioPinDriveMode.Input);
-
-            _spiclkPin = gpio.OpenPin(SPICLK_PIN);
-            _spiclkPin.SetDriveMode(GpioPinDriveMode.Output);
-
-            _spicsPin = gpio.OpenPin(SPICS_PIN);
-            _spicsPin.SetDriveMode(GpioPinDriveMode.Output);
-        }
-
-        private int ReadAdc(int adcPin)
-        {
-            if (adcPin > 7 || adcPin < 0)
-                throw new ArgumentException("The ADC pin needs to be between 0 - 7.", nameof(adcPin));
-
-            _spicsPin.Write(GpioPinValue.High);
-            _spiclkPin.Write(GpioPinValue.Low);
-            _spicsPin.Write(GpioPinValue.Low);
-
-            var commandOut = adcPin;
-            commandOut |= 0x18;
-            commandOut <<= 3;
-
-            foreach (int i in Enumerable.Range(1, 5))
+            try
             {
-                _spimosiPin.Write((commandOut & 0x80) == 1 ? GpioPinValue.High : GpioPinValue.Low);
-                commandOut <<= 1;
-                _spiclkPin.Write(GpioPinValue.High);
-                _spiclkPin.Write(GpioPinValue.Low);
+                var settings = new SpiConnectionSettings(SPI_CHIP_SELECT_LINE);
+                settings.ClockFrequency = 500000;   /* 0.5MHz clock rate                                        */
+                settings.Mode = SpiMode.Mode0;      /* The ADC expects idle-low clock polarity so we use Mode0  */
+
+                string spiAqs = SpiDevice.GetDeviceSelector(SPI_CONTROLLER_NAME);
+                var deviceInfo = await DeviceInformation.FindAllAsync(spiAqs);
+                SpiADC = await SpiDevice.FromIdAsync(deviceInfo[0].Id, settings);
             }
 
-            int adcOut = 0;
-
-            foreach (int i in Enumerable.Range(1, 12))
+            /* If initialization fails, display the exception and stop running */
+            catch (Exception ex)
             {
-                _spiclkPin.Write(GpioPinValue.High);
-                _spiclkPin.Write(GpioPinValue.Low);
-
-                adcOut <<= 1;
-
-                if (_spimisoPin.Read() == GpioPinValue.High)
-                    adcOut |= 0x1;
+                throw new Exception("SPI Initialization Failed", ex);
             }
-
-            _spicsPin.Write(GpioPinValue.High);
-
-            adcOut >>= 1;
-            return adcOut;
         }
+
+        private void Timer_Tick(object state)
+        {
+            int adcValue = ReadADC();
+
+            /* UI updates must be invoked on the UI thread */
+            var task = this.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
+            {
+                textPlaceHolder.Text = adcValue.ToString();         /* Display the value on screen                      */
+            });
+        }
+
+        public int ReadADC()
+        {
+            byte[] readBuffer = new byte[3]; /* Buffer to hold read data*/
+            byte[] writeBuffer = new byte[3] { 0x00, 0x00, 0x00 };
+
+            writeBuffer[0] = MCP3008_CONFIG[0];
+            writeBuffer[1] = MCP3008_CONFIG[1];
+
+            SpiADC.TransferFullDuplex(writeBuffer, readBuffer); /* Read data from the ADC                           */
+            return convertToInt(readBuffer);                    /* Convert the returned bytes into an integer value */            
+        }
+
+        /* Convert the raw ADC bytes to an integer */
+        public int convertToInt(byte[] data)
+        {
+            int result = 0;
+            result = data[1] & 0x03;
+            result <<= 8;
+            result += data[2];
+            return result;
+        }
+
+        private const string SPI_CONTROLLER_NAME = "SPI0";  /* Friendly name for Raspberry Pi 2 SPI controller          */
+        private const Int32 SPI_CHIP_SELECT_LINE = 0;       /* Line 0 maps to physical pin number 24 on the Rpi2        */
+        private SpiDevice SpiADC;
+
+        private readonly byte[] MCP3008_CONFIG = { 0x01, 0x80 }; /* 00000001 10000000 channel configuration data for the MCP3008 */
+
+        private Timer periodicTimer;
     }
 }
